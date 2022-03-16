@@ -1,0 +1,614 @@
+---
+title: "Missing Data Final Project"
+author: "Siyun Li"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+## Set Up 
+
+```{r, message=FALSE}
+# load necessary r packages
+library(tidyverse)
+library(mice)
+library(ggplot2)
+library(patchwork)
+library(nnet)
+```
+
+```{r, message=FALSE}
+# load full raw data
+ice.cream.full <- read_csv("ice_cream_raw_data.csv")
+
+# remove irrelevant columns and shuffle the dataset
+set.seed(2022)
+ice.cream.full <- ice.cream.full %>% 
+  select(-id) %>%
+  slice(sample(1:n())) %>%
+  mutate(female = as.factor(female), ice_cream = as.factor(ice_cream))
+
+# glimpse of the dataset
+head(ice.cream.full,5)
+```
+\
+
+## Introduction
+
+The data set was downloaded from the webiste of The University of Sheffield ([source](https://www.sheffield.ac.uk/mash/statistics/datasets)). 200 high school students were asked to play a video game and a puzzle, and then their scores and sex were recorded. In addition, students also reported their favorite flavor of ice cream – vanilla, chocolate or strawberry.
+
+The imported data set contains 200 observations and 4 variables. 
+
+Categorical variables include:
+
+- "female": the sex of the participating students with 2 levels (0 as male, 1 as female). 
+
+- "ice_cream": students' choice of favorite ice cream flavor with 3 levels (1 as Vanilla, 2 as Chocolate, and 3 as Strawberry). 
+
+Continuous variables are video game scores and puzzle scores. 
+
+In this project, the ice cream flavor(ice_cream) would be the outcome variable, and we are going to use multinomial regression to see what relationships it exists with video game scores (video), puzzle scores (puzzle) and gender (female). The ultimate goal of this project is to compare different methods to fix missing data. 
+
+### Fit Regression
+
+```{r}
+model.full <- multinom(ice_cream ~ female + video + puzzle, data = ice.cream.full)
+
+summary(model.full)
+mean(summary(model.full)$standard.errors)
+```
+\
+
+## Create Missingness 
+
+Since there is no missingness in the original data set, we generate missing values using the ampute function with its default MAR mechanism while leaving the puzzle variable as the fully observed numerical variable. 
+
+```{r, warning=FALSE}
+# create missingness with ampute
+set.seed(233)
+ice.cream.miss <- cbind(ampute(ice.cream.full[,1:3], prop = 0.2)$amp,
+                        ice.cream.full[,4])
+
+# change to correct variable types
+ice.cream.miss <- ice.cream.miss %>%
+  mutate (female = case_when(female == "2" ~ "1",
+                    female == "1" ~ "0")) %>%
+  mutate(female = as.factor(female), ice_cream = as.factor(ice_cream)) 
+
+```
+
+### Missingness Percentage
+
+To obtain around 20% missing cases, the proportion of missingness is set to 0.2. As seen from the below missingness percentage summaries, each variable (except for puzzle scores) has around 6.5-7% missing values. The complete case percentage returns 0.795, indicating that the data set now has 20.5% missing cases. 
+
+```{r, warning=FALSE}
+# per variable % missing
+ice.cream.miss %>% 
+summarize_all(funs(percent.miss = sum(is.na(.))/n()))
+
+# complete case percentage 
+sum(complete.cases(ice.cream.miss))/nrow(ice.cream.miss)
+
+# five-number summary statistics + missing number
+summary(ice.cream.miss)
+```
+
+### Plotting the dataset with missingness
+
+```{r, fig.dim = c(7, 3.5)}
+# create bar plots for categorical variables
+plot.female.miss <- ggplot(ice.cream.miss, aes(x = female)) +
+  geom_bar()
+
+plot.icecream.miss <- ggplot(ice.cream.miss, aes(x = ice_cream)) +
+  geom_bar()
+
+plot.female.miss + plot.icecream.miss
+
+# create histograms for continuous variables
+plot.video.miss <- ggplot(ice.cream.miss, aes(x = video)) +
+  geom_histogram(binwidth=2, colour="grey")
+
+plot.puzzle <- ggplot(ice.cream.miss, aes(x = puzzle)) +
+  geom_histogram(binwidth=2, colour="grey")
+
+plot.video.miss + plot.puzzle
+```
+
+## Methods to Fix Missing Data {.tabset}
+
+### Listwise Deletion
+
+> Listwise deletion method simply throws out all variables that have any missing data. It is the quickest way to obtain a full data set without missing values, but it can reduce the sample size dramatically, causing higher standard errors and bias. 
+
+```{r}
+ice.cream.listwise <- na.omit(ice.cream.miss)
+(200-nrow(ice.cream.listwise))/200
+```
+
+By using the na.omit function, we can see that the number of observations drops by 20.5%. 
+
+```{r}
+# fit regression again 
+model.listwise <- multinom(ice_cream ~ female + video + puzzle, data = ice.cream.listwise)
+summary(model.listwise)
+
+# average % change in all regression coefficients
+mean(abs(coef(model.full) - coef(model.listwise))/abs(coef(model.full)))
+
+# mean se
+mean(summary(model.listwise)$standard.errors)
+```
+After re-fitting the model, we can see that the average change in coefficients is around 45%, which is a rather a big change. The standard errors also increased. 
+
+### Mean/Mode Imputation
+
+> For each variable with missing values, mean/mode imputation method fills in all missing values with the mean/mode of the observed values for that variable (use mean imputation for numerical variables and mode imputation for categorical variables). This method may cause big change in the distribution of a variable, particularly when it is skewed.
+
+To implement mean imputation, we can use the **mice** package.
+
+```{r}
+library(mice)
+```
+
+
+```{r, warning=FALSE}
+mean.impute <- mice(data.frame(ice.cream.miss[,c(3,4)]), 
+                             method = "mean", m = 1, maxit = 1)
+
+ice.cream.mean.imputed <- complete(mean.impute)
+```
+```{r}
+tail(ice.cream.mean.imputed, 15)
+mean(ice.cream.miss$video, na.rm = T)
+```
+We can see that the NAs are now replaced with the mean value (51.96) of the observed entries for the *video* variable.
+\
+
+To implement mode imputation, we can use the **missMethods** package. (Mean imputation can also be carried out using this package)
+
+```{r, warning=FALSE}
+library(missMethods)
+```
+```{r}
+ice.cream.mode.imputed <- impute_mode(ice.cream.miss[c(1,2)], type = "columnwise")
+head(ice.cream.mode.imputed, 10)
+```
+Now, combine the two imputed datasets.
+
+```{r}
+ice.cream.m.impute <- cbind(ice.cream.mode.imputed, ice.cream.mean.imputed)
+```
+\
+
+#### Illustration of Mean/Mode Imputation
+
+```{r, fig.dim = c(7, 3.5)}
+# variable video
+plot.video.full <- ggplot(ice.cream.full, aes(x = video)) +
+  geom_histogram(binwidth=2, colour="grey") +
+  coord_cartesian(ylim = c(0, 30)) 
+
+plot.mean.impute <- ggplot(ice.cream.mean.imputed, aes(x = video)) +
+  geom_histogram(binwidth=2, colour="grey") +
+  labs(x = "imputed video")+
+  coord_cartesian(ylim = c(0, 30)) 
+
+plot.video.full + plot.mean.impute
+```
+
+The illustration here compares the distribution of the variable *video* before and after mean imputation. The imputed variable still follows a normal distribution like the original variable, but with a decrease in variance. We can see that the data concentrates more in the center in the second plot. 
+\
+
+```{r, fig.dim = c(7, 3.5)}
+# variable female
+plot.female.full <- ggplot(ice.cream.full, aes(x = female)) +
+  geom_bar() + coord_cartesian(ylim = c(0, 120)) 
+
+plot.mode.impute.female <- ggplot(ice.cream.mode.imputed, aes(x = female)) +
+  geom_bar() + coord_cartesian(ylim = c(0, 120)) +
+  labs(x = "imputed female")
+
+plot.female.full + plot.mode.impute.female
+```
+
+```{r, fig.dim = c(7, 3.5)}
+# variable ice_cream
+plot.icecream.full <- ggplot(ice.cream.full, aes(x = ice_cream)) +
+  geom_bar() + coord_cartesian(ylim = c(0, 110))
+
+plot.mode.impute.icecream <- ggplot(ice.cream.mode.imputed, aes(x = ice_cream)) +
+  geom_bar() + labs(x = "imputed ice_cream") + 
+  coord_cartesian(ylim = c(0, 110))
+
+plot.icecream.full + plot.mode.impute.icecream
+```
+
+The mode imputation does not alter the distribution of the two categorical variables too much, which may be due to a relatively small size and number of missing values. 
+\
+
+#### Model Fitting
+
+Now we fit the regression again using the imputed data set. 
+
+```{r}
+model.m.imputed <- multinom(ice_cream ~ female + video + puzzle, 
+                               data = ice.cream.m.impute)
+summary(model.m.imputed)
+
+# average % change in all regression coefficients
+mean(abs(coef(model.full) - coef(model.m.imputed))/abs(coef(model.full)))
+
+# mean se
+mean(summary(model.m.imputed)$standard.errors)
+```
+
+The mode/mean imputation shows to have 35.87 % average change in coefficient values, proving to perform better than the complete case method, but it might only apply to the cases when the original variable follows a normal distribution and when the percentage of missingness is not large. 
+
+### Random Imputation
+
+>The random imputation method randomly samples values from the observed cases and replace the missing values. It can apply to both numerical and categorical variables. One disadvantage of this method is that it may introduce additional variability because of the random selection of residuals.
+
+To implement this method, we use the **mice** package again and set the method to "sample."
+
+```{r}
+random.impute <- mice(data.frame(ice.cream.miss), 
+                             method = "sample", m = 1, maxit = 1)
+
+ice.cream.r.imputed <- complete(random.impute)
+head(ice.cream.r.imputed, 10)
+```
+\
+
+Now we fit the regression again using the imputed data set. 
+
+```{r}
+model.r.imputed <- multinom(ice_cream ~ female + video + puzzle, 
+                               data = ice.cream.r.imputed)
+summary(model.r.imputed)
+
+# average % change in all regression coefficients
+mean(abs(coef(model.full) - coef(model.r.imputed))/abs(coef(model.full)))
+
+# mean se
+mean(summary(model.r.imputed)$standard.errors)
+```
+The random imputation shows to have 112.96 % average change in coefficient values.
+\
+
+```{r}
+coef(model.full) - coef(model.r.imputed)
+```
+
+By examining the difference of each coefficient between two models, we can find that the significant changes in the coefficient values mainly happened on the intercepts and the categorical variable. 
+
+### Hotdecking
+
+>For each observation with a missing y value, hot-deck imputation finds another observation with the same or close values of X in the observed data and take its y value. This method is widely used but can get problematic if many variables have missing data, or if there is too much missing data. 
+
+To implement this method, we use package **VIM**.
+
+```{r, message=FALSE}
+library(VIM)
+```
+
+```{r}
+set.seed(233)
+ice.cream.hotdeck <- hotdeck(ice.cream.miss, variable = 
+                               c("female", "ice_cream", "video"))[,c(1:4)]
+```
+
+Now we fit the regression again using the imputed data set. 
+
+```{r}
+model.hotdeck <- multinom(ice_cream ~ female + video + puzzle, 
+                               data = ice.cream.hotdeck)
+summary(model.hotdeck)
+
+# average % change in all regression coefficients
+mean(abs(coef(model.full) - coef(model.hotdeck))/abs(coef(model.full)))
+
+# mean se
+mean(summary(model.hotdeck)$standard.errors)
+```
+
+The hot-deck imputation shows to have 36.25 % average change in coefficient values.
+
+### Regression Imputation
+
+>Regression imputation basically treats NAs as values to predict using a statistical model. However, while there should be residuals between observed data points and fitted values, with this imputation approach, the imputed values always fall right on the fitted line. 
+
+Since 3 out of 4 variables in the data set have missing values and different variable types, we need to create three different models to predict three different types of variables. 
+\
+
+Establish a multinominal logistic regression to predict the missing values for the unordered categorical variable *ice_cream*. 
+
+```{r}
+# separate the data set by whether the predicted variable is missing or not
+ice.cream.na <- ice.cream.miss %>%
+  filter(is.na(ice_cream) == T)
+
+ice.cream.observed <- ice.cream.miss %>%
+  filter(is.na(ice_cream) == F)
+
+# create the model using the fully observed data set 
+pred.model.ice.cream <- multinom(ice_cream ~ female + video + puzzle, 
+                               data = ice.cream.observed)
+
+# predict the missing values        
+reg.impute.ice.cream <- predict(pred.model.ice.cream, 
+                                newdata = ice.cream.na, type = "class")
+
+ice.cream.r.imputed <- ice.cream.miss
+
+# impute the data set with the predicted values
+ice.cream.r.imputed$ice_cream[is.na(ice.cream.r.imputed$ice_cream) == T] = reg.impute.ice.cream
+```
+\
+
+Establish a logistic regression to predict the missing values for the binary variable *female*. 
+
+```{r}
+# separate the data set by whether the predicted variable is missing or not
+female.na <- ice.cream.miss %>%
+  filter(is.na(female) == T)
+
+female.observed <- ice.cream.miss %>%
+  filter(is.na(female) == F)
+
+# create the model using the fully observed data set 
+pred.model.female <- glm(female ~ ice_cream + video + puzzle, 
+                         data = female.observed, 
+                         family = "binomial")
+
+# predict the missing values        
+reg.impute.female <- predict(pred.model.female, 
+                                newdata = data.frame(female.na), type = "response")
+
+# impute the data set with the predicted values
+ice.cream.r.imputed$female[is.na(ice.cream.r.imputed$female) == T] = 
+  round(reg.impute.female,0)
+```
+\
+
+Establish a linear regression to predict the missing values for the numerical variable *video*.
+
+```{r}
+# separate the data set by whether the predicted variable is missing or not
+video.na <- ice.cream.miss %>%
+  filter(is.na(video) == T)
+
+video.observed <- ice.cream.miss %>%
+  filter(is.na(video) == F)
+
+# create the model using the fully observed data set 
+pred.model.video <- lm(video ~ female + ice_cream + puzzle, 
+                         data = video.observed)
+
+# predict the missing values        
+reg.impute.video <- predict(pred.model.video, 
+                                newdata = data.frame(video.na))
+
+# impute the data set with the predicted values
+ice.cream.r.imputed$video[is.na(ice.cream.r.imputed$video) == T] = reg.impute.video
+```
+\
+
+Now that the missing values of the date set are fully imputed, we can run the regression analysis again and compare it with the original model. 
+
+```{r}
+model.regression <- multinom(ice_cream ~ female + video + puzzle, 
+                               data = ice.cream.r.imputed)
+summary(model.regression)
+
+# average % change in all regression coefficients
+mean(abs(coef(model.full) - coef(model.regression))/abs(coef(model.full)))
+
+# mean se
+mean(summary(model.regression)$standard.errors)
+```
+
+The regression imputation shows to have 17.3 % average change in coefficient values, which shows to be the method that controls the average coefficient change to the smallest by far.
+
+### Regression Imputation with Noise
+
+>As stated in the previous section, the imputed values will always fall right on the fitted regression line. Thus, to add back in most of the variability that standard regression imputation removes, we can try to add noise to the imputed values. 
+
+```{r}
+ice.cream.r.imputed.noise <- ice.cream.miss
+```
+\
+
+In order to add noise for a multinomial variable, we have to change the prediction type from "class" to "probability".
+
+```{r}
+reg.impute.ice.cream.prob <- predict(pred.model.ice.cream, 
+                                newdata = ice.cream.na, type = "prob")
+
+cat.imp <- numeric(length(reg.impute.ice.cream))
+
+set.seed(2022)
+for (i in 1:length(reg.impute.ice.cream)){
+  cat.imp[i] = sum(rmultinom(1, 1, reg.impute.ice.cream.prob[i,])*c(1:3))
+}
+
+# impute the data set with the predicted values added with the noise
+ice.cream.r.imputed.noise$ice_cream[is.na(ice.cream.r.imputed.noise$ice_cream) == T] =
+  cat.imp
+```
+
+```{r}
+# impute female variable with noise
+set.seed(2022)
+ice.cream.r.imputed.noise$female[is.na(ice.cream.r.imputed.noise$female) == T] = 
+  rbinom(length(reg.impute.female), 1, reg.impute.female)
+```
+
+```{r}
+# create noise for video
+set.seed(2022)
+video.noise <- rnorm(length(reg.impute.video), mean = 0, 
+                     sd = summary(pred.model.video)$sigma)
+
+# impute the data set with the predicted values added with the noise
+ice.cream.r.imputed.noise$video[is.na(ice.cream.r.imputed.noise$video) == T] = 
+  reg.impute.video + video.noise
+```
+\
+
+Now we fit the regression again and see if there is any change.
+
+```{r}
+model.reg.noise <- multinom(ice_cream ~ female + video + puzzle, 
+                               data = ice.cream.r.imputed.noise)
+summary(model.reg.noise)
+
+# average % change in all regression coefficients
+mean(abs(coef(model.full) - coef(model.reg.noise))/abs(coef(model.full)))
+
+# mean se
+mean(summary(model.reg.noise)$standard.errors)
+```
+
+The regression imputation with noise shows to have a 42.92 % average change in coefficient values. 
+
+### Multiple Imputation
+
+> Multiple imputation uses observed data to impute missing values that reflect both sampling variability and model uncertainty. It creates several imputations for each missing value and thus creates several completed datasets. Compared to other methods listed above, multiple imputation can be more complex to implement. 
+
+We use **mi** package to run multiple imputation here.
+
+```{r, message=FALSE}
+library(mi)
+```
+
+```{r, fig.dim = c(5, 6)}
+# create a missing_data object
+mdf <- missing_data.frame(ice.cream.miss)
+
+# six figure summary with NAs
+summary(mdf)
+
+# show histograms of the observed variables that have missingness
+hist(mdf)
+
+# plots an image to visualize the pattern of missingness 
+image(mdf)
+
+# examine missing data patterns
+levels(mdf@patterns) # shows that there are 4 missing data patterns 
+tabulate(mdf@patterns) # missing data pattern frequency 
+
+# examine defaults to see if they make sense
+show(mdf)
+```
+
+```{r, message=FALSE}
+# impute until converged
+imputations <- mi(mdf, seed = 233, parallel = F)
+converged <- mi2BUGS(imputations)
+```
+\
+
+#### Check Convergence
+
+We create traceplots for the three variables to see if the mean of the imputed values have reached convergence, which indicates that we are imputing from "stationary distributions".
+
+```{r, fig.dim = c(5, 5)}
+# female variable
+mean.female = converged[, , 1]
+
+ts.plot(mean.female[,1], col=1)
+lines(mean.female[,2], col= 2)
+lines(mean.female[,3], col= 3)
+lines(mean.female[,4], col= 4)
+```
+
+```{r, fig.dim = c(5, 5)}
+# ice_cream variable
+mean.ice.cream = converged[, , 2]
+
+ts.plot(mean.ice.cream[,1], col=1)
+lines(mean.ice.cream[,2], col= 2)
+lines(mean.ice.cream[,3], col= 3)
+lines(mean.ice.cream[,4], col= 4)
+```
+
+```{r, fig.dim = c(5, 5)}
+# video variable
+mean.video = converged[, , 3]
+
+ts.plot(mean.video[,1], col=1)
+lines(mean.video[,2], col= 2)
+lines(mean.video[,3], col= 3)
+lines(mean.video[,4], col= 4)
+```
+
+Alternatively, we can also check convergence by looking at Rhat statistic (estimated potential scale reduction). Ideally, it should be less than 1.1.
+
+```{r}
+Rhats(imputations)
+```
+\
+
+#### Run Diagnostics
+
+After convergence is checked, we can now plot some diagnostics to see if there is any inconsistency between the observed values (blue-colored) and imputed values (red-colored). 
+
+```{r, fig.dim = c(7, 6)}
+plot(imputations)
+```
+\
+
+#### Run Pooled Analysis
+
+Lastly, we fit the regression using the pooled dataset after running multiple imputation. 
+
+```{r}
+model.mi <- mi::pool(ice_cream ~ female + video + puzzle, data=imputations)
+summary(model.mi)
+```
+\
+
+Compare to the original model:
+
+```{r}
+# average % change in all regression coefficients
+mi.coef <- matrix(coef(model.mi), 2, 4, byrow = TRUE) 
+mean(abs(coef(model.full) - mi.coef)/abs(coef(model.full)))
+
+# mean se
+mean(summary(model.mi)$standard.errors)
+```
+
+The multiple imputation obtained a 38.74 % average change in coefficient values. 
+\
+\
+
+## Discussion
+
+Now we tabulate the estimated parameters, mean standard errors, and percent change in coefficients resulted from different models. 
+
+Imputation Method      | Original    | Listwise Deletion | Mean/Mode Imputation | Random Imputation |Hotdecking|Regression Imputation|Regression Imputation with Noise| Multiple Imputation|
+-----------------------|-------------|  -------------    |  -------------       | -------------     | ------------- |  ------------- | ------------- |  ------------- |     
+2-intercept            | 1.912    |1.898    | 2.466| 2.171| 0.994| 2.362| 2.618| 1.962|
+2-female1              | 0.817  |0.798  | 0.423| 0.700| 0.617| 0.555| 0.575| 0.63|
+2-video                | -0.024 |-0.026 |-0.032|-0.022|-0.017|-0.032|-0.035|-0.027|
+2-puzzle               | -0.039 |-0.037 |-0.041|-0.044|-0.024|-0.040|-0.042|-0.036|
+3-intercept            | -4.057  |-3.253   |-3.927|-3.713|-3.793|-4.488|-3.609|-4.693|
+3-female1              | -0.033 |0.055 |-0.000|0.233|-0.038|-0.030| 0.013| 0.036|
+3-video                | 0.023  |0.019  |0.011|0.0145| 0.002| 0.022| 0.009| 0.028|
+3-puzzle               | 0.043  |0.027  |0.049|0.043| 0.059| 0.050| 0.049| 0.050|
+mean se                | 0.397  |0.433   |0.407  |0.398| 0.388| 0.410| 0.396| 0.402|
+percent change in coef |     -       |45.05%      | 35.87 % | 112.96 %| 36.25 % |  17.3 % | 42.92 % |38.74 %|
+
+
+Among all the methods we implemented above, regression imputation seems to be the best method with only 17.3% change in coefficients compared to the original model, followed by mean/mode imputation with 35.87 % change in coefficients. Hotdecking and Regression imputation with noise, though also resulted in a changed around 40%, but the actual outputs relied strongly on the seed number. When the seed was set differently, the percent change could vary dramatically. Random imputation turns out to be the worst method in this case, with more than 100% change in coefficients. The mean standard errors resulted from different methods are all very close to each other(around 0.4). Regression imputation with noise produced the smallest standard error. 
+\
+
+By looking at the estimates differed by their variable types, we can find out that categorical variables are generally harder to impute than the continuous variables, since more variability exists in estimates for "female". However, it is suprising that when regression imputation was added with noise, the change in coefficients became bigger rather than smaller. It is also unexpected that while multiple imputation also used different regression models to impute variables, it did not perform better than the simple regression imputation. 
+\
+
+In summary, the imputation for missing values could become more complicated when multiple variables with different types have NAs. 
